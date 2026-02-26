@@ -94,6 +94,8 @@ function DevicePanel() {
   const [selectedConnectedDevice, setSelectedConnectedDevice] = useState("");
   const [ownerName, setOwnerName] = useState("Device Owner");
   const [consentDurationMinutes, setConsentDurationMinutes] = useState("120");
+  const [accessProfile, setAccessProfile] = useState("developer");
+  const [persistentAccess, setPersistentAccess] = useState(true);
   const [consentRequestId, setConsentRequestId] = useState("");
   const [consentCodeInput, setConsentCodeInput] = useState("");
   const [latestConsentCode, setLatestConsentCode] = useState("");
@@ -435,7 +437,9 @@ function DevicePanel() {
       deviceType: selectedConnected.deviceType,
       deviceId: selectedConnected.deviceId,
       ownerName,
-      durationMinutes: Number(consentDurationMinutes) || 120
+      durationMinutes: Number(consentDurationMinutes) || 120,
+      accessProfile,
+      persistentAccess
     });
     if (!result?.ok) {
       setDeviceAccessStatus(result?.message || "Approval request failed.");
@@ -443,7 +447,9 @@ function DevicePanel() {
     }
     setConsentRequestId(result.requestId || "");
     setLatestConsentCode(result.consentCode || "");
-    setDeviceAccessStatus(`${result.message} Expires: ${result.expiresAt}`);
+    setDeviceAccessStatus(
+      `${result.message} Profile: ${result.accessProfile}. Expires: ${result.expiresLabel || result.expiresAt || "n/a"}`
+    );
   };
 
   const confirmConsentForDevice = async () => {
@@ -982,7 +988,7 @@ function DevicePanel() {
           <h3 className="sub-heading">Trusted Device Control</h3>
           <p className="helper-text">
             Step 1: Find devices. Step 2: Ask owner for approval code. Step 3: Confirm and run
-            your action.
+            your action. Use persistent trust for one-time pairing until owner revokes it.
           </p>
 
           <div className="inline-buttons">
@@ -1026,7 +1032,44 @@ function DevicePanel() {
                 className="field-input"
                 value={consentDurationMinutes}
                 onChange={(event) => setConsentDurationMinutes(event.target.value)}
+                disabled={persistentAccess}
               />
+            </div>
+          </div>
+
+          <div className="inline-two">
+            <div>
+              <label className="field-label">Access Profile</label>
+              <select
+                className="field-input"
+                value={accessProfile}
+                onChange={(event) => setAccessProfile(event.target.value)}
+              >
+                <option value="standard">Standard (read-only + list files)</option>
+                <option value="developer">Developer (read/write + browser export)</option>
+              </select>
+            </div>
+            <div>
+              <label className="field-label">Trust Mode</label>
+              <div className="inline-buttons">
+                <button
+                  className={persistentAccess ? "btn btn-accent" : "btn btn-neutral"}
+                  onClick={() => setPersistentAccess(true)}
+                >
+                  Persistent
+                </button>
+                <button
+                  className={!persistentAccess ? "btn btn-accent" : "btn btn-neutral"}
+                  onClick={() => setPersistentAccess(false)}
+                >
+                  Timed
+                </button>
+              </div>
+              <small>
+                {persistentAccess
+                  ? "Persistent trust stays active until owner revokes it."
+                  : "Timed trust auto-expires after selected minutes."}
+              </small>
             </div>
           </div>
 
@@ -1124,8 +1167,8 @@ function DevicePanel() {
               ? activeConsents
                   .map(
                     (item) =>
-                      `${item.deviceType}:${item.deviceId} | owner=${item.ownerName} | expires=${item.expiresAt}`
-                    )
+                      `${item.deviceType}:${item.deviceId} | owner=${item.ownerName} | profile=${item.accessProfile || "developer"} | expires=${item.expiresLabel || item.expiresAt || "never"}`
+                  )
                   .join("\n")
               : "No active approvals."}
           </div>

@@ -13,6 +13,18 @@ const DEVICE_ACCESS_MINUTES_DEFAULT = 120;
 const DEVICE_ACCESS_MINUTES_MAX = 30 * 24 * 60;
 const BACKUP_ROOT_FOLDER = "AIANKUR-Backups";
 const BROWSER_EXPORT_ROOT_FOLDER = "AIANKUR-Browser-Exports";
+const OWNER_REQUEST_WINDOW_MINUTES = 30;
+const DEVICE_ACCESS_PROFILE_DEFAULT = "developer";
+const DEVICE_ACCESS_PROFILES = Object.freeze({
+  standard: ["read-device-info", "list-accessible-files"],
+  developer: [
+    "read-device-info",
+    "list-accessible-files",
+    "modify-files",
+    "browser-export",
+    "run-backups"
+  ]
+});
 
 let mainWindow = null;
 let autoUpdaterInstance = undefined;
@@ -83,6 +95,41 @@ function clampConsentMinutes(durationMinutes) {
   return Math.max(10, Math.min(DEVICE_ACCESS_MINUTES_MAX, Math.floor(value)));
 }
 
+function parseAccessProfile(accessProfile) {
+  const normalized = String(accessProfile || "").trim().toLowerCase();
+  if (normalized === "standard" || normalized === "developer") {
+    return normalized;
+  }
+  return DEVICE_ACCESS_PROFILE_DEFAULT;
+}
+
+function getScopesForAccessProfile(accessProfile) {
+  const profile = parseAccessProfile(accessProfile);
+  return [...(DEVICE_ACCESS_PROFILES[profile] || DEVICE_ACCESS_PROFILES[DEVICE_ACCESS_PROFILE_DEFAULT])];
+}
+
+function getGrantEffectiveScopes(grant) {
+  if (!grant || !Array.isArray(grant.scopes) || grant.scopes.length === 0) {
+    return getScopesForAccessProfile(DEVICE_ACCESS_PROFILE_DEFAULT);
+  }
+
+  if (!grant.accessProfile) {
+    // Backward compatibility for older grants created before profile-based scopes.
+    return getScopesForAccessProfile(DEVICE_ACCESS_PROFILE_DEFAULT);
+  }
+
+  return grant.scopes;
+}
+
+function grantHasScope(grant, scope) {
+  const required = String(scope || "").trim();
+  if (!required) {
+    return true;
+  }
+  const scopes = getGrantEffectiveScopes(grant);
+  return scopes.includes("*") || scopes.includes(required);
+}
+
 function pruneDeviceAccessState(state) {
   const nowMs = Date.now();
   const next = {
@@ -92,7 +139,8 @@ function pruneDeviceAccessState(state) {
 
   const pending = state?.pendingRequests || {};
   for (const [requestId, entry] of Object.entries(pending)) {
-    if (!entry?.expiresAt || new Date(entry.expiresAt).getTime() > nowMs) {
+    const requestExpiry = entry?.requestExpiresAt || entry?.expiresAt;
+    if (!requestExpiry || new Date(requestExpiry).getTime() > nowMs) {
       next.pendingRequests[requestId] = entry;
     }
   }
@@ -128,6 +176,9 @@ function requestDeviceConsent(payload) {
   const deviceType = String(payload?.deviceType || "").toLowerCase();
   const deviceId = String(payload?.deviceId || "").trim();
   const ownerName = String(payload?.ownerName || "").trim() || "Device Owner";
+  const accessProfile = parseAccessProfile(payload?.accessProfile);
+  const persistentAccess = Boolean(payload?.persistentAccess);
+  const scopes = getScopesForAccessProfile(accessProfile);
 
   if (!["android", "windows"].includes(deviceType)) {
     return { ok: false, message: "Unsupported device type." };
@@ -137,7 +188,10 @@ function requestDeviceConsent(payload) {
   }
 
   const minutes = clampConsentMinutes(payload?.durationMinutes);
-  const expiresAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+  const requestExpiresAt = new Date(Date.now() + OWNER_REQUEST_WINDOW_MINUTES * 60 * 1000).toISOString();
+  const grantExpiresAt = persistentAccess
+    ? null
+    : new Date(Date.now() + minutes * 60 * 1000).toISOString();
   const consentCode = String(crypto.randomInt(100000, 999999));
   const requestId = crypto.randomUUID();
 
@@ -147,20 +201,29 @@ function requestDeviceConsent(payload) {
     deviceType,
     deviceId,
     ownerName,
+    accessProfile,
+    scopes,
+    persistentAccess,
     codeHash: hashConsentCode(consentCode),
     createdAt: new Date().toISOString(),
-    expiresAt,
+    requestExpiresAt,
+    grantExpiresAt,
     durationMinutes: minutes
   };
   saveDeviceAccessStore(state);
 
+  const expiryText = grantExpiresAt || "never (until revoked)";
   return {
     ok: true,
     message: `Owner consent code generated for ${deviceType}:${deviceId}.`,
     requestId,
     consentCode,
-    expiresAt,
-    durationMinutes: minutes
+    expiresAt: grantExpiresAt,
+    expiresLabel: expiryText,
+    durationMinutes: minutes,
+    persistentAccess,
+    accessProfile,
+    scopes
   };
 }
 
@@ -187,18 +250,29 @@ function confirmDeviceConsent(payload) {
     deviceId: pending.deviceId,
     ownerName: pending.ownerName,
     grantedAt: new Date().toISOString(),
-    expiresAt: pending.expiresAt,
-    scopes: ["read-device-info", "list-accessible-files"]
+    expiresAt: pending.grantExpiresAt || null,
+    persistentAccess: Boolean(pending.persistentAccess),
+    accessProfile: parseAccessProfile(pending.accessProfile),
+    scopes: Array.isArray(pending.scopes) && pending.scopes.length
+      ? pending.scopes
+      : getScopesForAccessProfile(DEVICE_ACCESS_PROFILE_DEFAULT)
   };
   delete state.pendingRequests[requestId];
   saveDeviceAccessStore(state);
 
+  const expiryText = pending.grantExpiresAt || "never (until revoked)";
   return {
     ok: true,
     message: `Access granted by ${pending.ownerName} for ${pending.deviceType}:${pending.deviceId}.`,
     deviceType: pending.deviceType,
     deviceId: pending.deviceId,
-    expiresAt: pending.expiresAt
+    expiresAt: pending.grantExpiresAt || null,
+    expiresLabel: expiryText,
+    persistentAccess: Boolean(pending.persistentAccess),
+    accessProfile: parseAccessProfile(pending.accessProfile),
+    scopes: Array.isArray(pending.scopes) && pending.scopes.length
+      ? pending.scopes
+      : getScopesForAccessProfile(DEVICE_ACCESS_PROFILE_DEFAULT)
   };
 }
 
@@ -220,7 +294,29 @@ function getDeviceConsent(deviceType, deviceId) {
   if (!grant) {
     return { ok: false, message: "Access denied. Owner consent is not active.", grant: null };
   }
-  return { ok: true, message: "Consent active.", grant };
+  const effectiveGrant = {
+    ...grant,
+    accessProfile: parseAccessProfile(grant.accessProfile),
+    scopes: getGrantEffectiveScopes(grant),
+    persistentAccess: Boolean(grant.persistentAccess || !grant.expiresAt)
+  };
+  return { ok: true, message: "Consent active.", grant: effectiveGrant };
+}
+
+function getDeviceConsentWithScope(deviceType, deviceId, requiredScope) {
+  const consent = getDeviceConsent(deviceType, deviceId);
+  if (!consent.ok) {
+    return consent;
+  }
+
+  if (!grantHasScope(consent.grant, requiredScope)) {
+    return {
+      ok: false,
+      message: `Access denied. Owner granted limited scope; required scope missing: ${requiredScope}.`,
+      grant: consent.grant
+    };
+  }
+  return consent;
 }
 
 function runAdbCommand(args) {
@@ -406,7 +502,7 @@ function listBrowserDataSources(payload) {
     return { ok: false, message: "deviceType and deviceId are required.", sources: [] };
   }
 
-  const consent = getDeviceConsent(deviceType, deviceId);
+  const consent = getDeviceConsentWithScope(deviceType, deviceId, "browser-export");
   if (!consent.ok) {
     return { ok: false, message: consent.message, sources: [] };
   }
@@ -479,7 +575,7 @@ function exportWindowsBrowserData(payload) {
     };
   }
 
-  const consent = getDeviceConsent("windows", targetId);
+  const consent = getDeviceConsentWithScope("windows", targetId, "browser-export");
   if (!consent.ok) {
     return { ok: false, message: consent.message, destinationPath: "", files: [] };
   }
@@ -545,7 +641,7 @@ function exportAndroidBrowserData(payload) {
     return { ok: false, message: "Android device id is required.", destinationPath: "", files: [] };
   }
 
-  const consent = getDeviceConsent("android", serial);
+  const consent = getDeviceConsentWithScope("android", serial, "browser-export");
   if (!consent.ok) {
     return { ok: false, message: consent.message, destinationPath: "", files: [] };
   }
@@ -730,7 +826,7 @@ function applyWindowsDeviceChange(payload) {
   const authCode = String(payload?.authCode || "").trim();
   const content = String(payload?.content || "");
 
-  const consent = getDeviceConsent("windows", targetId);
+  const consent = getDeviceConsentWithScope("windows", targetId, "modify-files");
   if (!consent.ok) {
     return { ok: false, message: consent.message };
   }
@@ -776,7 +872,7 @@ function applyAndroidDeviceChange(payload) {
     return { ok: false, message: "Android serial is required." };
   }
 
-  const consent = getDeviceConsent("android", serial);
+  const consent = getDeviceConsentWithScope("android", serial, "modify-files");
   if (!consent.ok) {
     return { ok: false, message: consent.message };
   }
@@ -1621,10 +1717,17 @@ function registerIpcHandlers() {
 
   ipcMain.handle("device:list-consents", () => {
     const state = ensureDeviceAccessStore();
+    const grants = Object.values(state.grants || {}).map((grant) => ({
+      ...grant,
+      accessProfile: parseAccessProfile(grant.accessProfile),
+      scopes: getGrantEffectiveScopes(grant),
+      persistentAccess: Boolean(grant.persistentAccess || !grant.expiresAt),
+      expiresLabel: grant.expiresAt || "never (until revoked)"
+    }));
     return {
       ok: true,
       message: "Active owner consents loaded.",
-      consents: Object.values(state.grants)
+      consents: grants
     };
   });
 
@@ -1640,7 +1743,7 @@ function registerIpcHandlers() {
       return { ok: false, message: "Android serial is required.", info: null };
     }
 
-    const consent = getDeviceConsent("android", serial);
+    const consent = getDeviceConsentWithScope("android", serial, "read-device-info");
     if (!consent.ok) {
       return { ok: false, message: consent.message, info: null };
     }
@@ -1654,7 +1757,7 @@ function registerIpcHandlers() {
       return { ok: false, message: "Android serial is required.", files: [] };
     }
 
-    const consent = getDeviceConsent("android", serial);
+    const consent = getDeviceConsentWithScope("android", serial, "list-accessible-files");
     if (!consent.ok) {
       return { ok: false, message: consent.message, files: [] };
     }
@@ -1663,7 +1766,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle("device:windows-info", (_event, payload) => {
     const targetId = String(payload?.targetId || os.hostname()).trim() || os.hostname();
-    const consent = getDeviceConsent("windows", targetId);
+    const consent = getDeviceConsentWithScope("windows", targetId, "read-device-info");
     if (!consent.ok) {
       return { ok: false, message: consent.message, info: null };
     }

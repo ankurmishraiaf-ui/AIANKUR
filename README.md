@@ -65,6 +65,11 @@ This build provides a practical architecture to integrate free local models and 
    - Auto-start disabled by default on supported desktop platforms
    - Runtime toggle available in the "Extension + Update Hub" panel
 
+10. **Trusted owner device access**
+   - One-time owner approval flow with persistent trust option (active until revoked) or timed trust
+   - Access profiles: `standard` (read/list) and `developer` (read/write + browser export)
+   - Scope-aware enforcement for device info, file changes, and browser export actions
+
 ## Build and Run
 
 ### Prerequisites

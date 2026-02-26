@@ -970,6 +970,11 @@ function getTimestampText() {
 }
 
 function runSingleBackupJob(job) {
+  const consent = getDeviceConsentWithScope(job.deviceType, job.deviceId, "run-backups");
+  if (!consent.ok) {
+    return { ok: false, message: consent.message };
+  }
+
   const backupRoot = job.backupRoot || getDefaultBackupRootPath();
   fs.mkdirSync(backupRoot, { recursive: true });
   const jobLabel = sanitizeBackupLabel(job.label || `${job.deviceType}-${job.deviceId}`);
@@ -997,10 +1002,6 @@ function runSingleBackupJob(job) {
   if (job.deviceType === "android") {
     if (!isAllowedAndroidMutationPath(job.sourcePath)) {
       return { ok: false, message: "Android backup source path is outside allowed scope." };
-    }
-    const consent = getDeviceConsent("android", job.deviceId);
-    if (!consent.ok) {
-      return { ok: false, message: consent.message };
     }
 
     fs.mkdirSync(destinationPath, { recursive: true });
@@ -1033,9 +1034,19 @@ function createBackupJob(payload) {
     return { ok: false, message: "Secret code validation failed." };
   }
 
-  const consent = getDeviceConsent(deviceType, deviceId);
+  const consent = getDeviceConsentWithScope(deviceType, deviceId, "run-backups");
   if (!consent.ok) {
     return { ok: false, message: consent.message };
+  }
+
+  if (deviceType === "windows") {
+    const expectedId = os.hostname();
+    if (deviceId.toLowerCase() !== expectedId.toLowerCase()) {
+      return {
+        ok: false,
+        message: "Only local Windows background sync is supported in this build."
+      };
+    }
   }
 
   if (deviceType === "windows" && !isAllowedWindowsMutationPath(sourcePath)) {
@@ -1120,6 +1131,38 @@ function removeBackupJob(jobId) {
   store.jobs = nextJobs;
   saveBackupJobsStore(store);
   return { ok: true, message: "Backup job removed." };
+}
+
+function listBackupJobs(payload) {
+  const deviceTypeFilter = String(payload?.deviceType || "").toLowerCase();
+  const deviceIdFilter = String(payload?.deviceId || "").trim().toLowerCase();
+
+  const store = ensureBackupJobsStore();
+  let jobs = Array.isArray(store.jobs) ? store.jobs : [];
+
+  if (deviceTypeFilter) {
+    jobs = jobs.filter((item) => String(item.deviceType || "").toLowerCase() === deviceTypeFilter);
+  }
+  if (deviceIdFilter) {
+    jobs = jobs.filter((item) => String(item.deviceId || "").toLowerCase() === deviceIdFilter);
+  }
+
+  const now = Date.now();
+  const normalizedJobs = jobs.map((job) => {
+    const intervalMs = Math.max(5, Number(job.intervalMinutes) || 60) * 60 * 1000;
+    const lastRunMs = job.lastRunAt ? new Date(job.lastRunAt).getTime() : 0;
+    const nextRunMs = lastRunMs ? lastRunMs + intervalMs : now;
+    return {
+      ...job,
+      nextRunAt: job.enabled ? new Date(nextRunMs).toISOString() : null
+    };
+  });
+
+  return {
+    ok: true,
+    message: `Loaded ${normalizedJobs.length} background job(s).`,
+    jobs: normalizedJobs
+  };
 }
 
 function startBackupScheduler() {
@@ -1785,6 +1828,35 @@ function registerIpcHandlers() {
 
   ipcMain.handle("browser:export", (_event, payload) => exportBrowserData(payload));
 
+  ipcMain.handle("backup:list-jobs", (_event, payload) => listBackupJobs(payload));
+
+  ipcMain.handle("backup:create-job", (_event, payload) => createBackupJob(payload));
+
+  ipcMain.handle("backup:set-enabled", (_event, payload) => {
+    const jobId = String(payload?.jobId || "").trim();
+    const enabled = Boolean(payload?.enabled);
+    if (!jobId) {
+      return { ok: false, message: "jobId is required." };
+    }
+    return setBackupJobEnabled(jobId, enabled);
+  });
+
+  ipcMain.handle("backup:run-now", (_event, payload) => {
+    const jobId = String(payload?.jobId || "").trim();
+    if (!jobId) {
+      return { ok: false, message: "jobId is required." };
+    }
+    return runBackupJobNow(jobId);
+  });
+
+  ipcMain.handle("backup:remove-job", (_event, payload) => {
+    const jobId = String(payload?.jobId || "").trim();
+    if (!jobId) {
+      return { ok: false, message: "jobId is required." };
+    }
+    return removeBackupJob(jobId);
+  });
+
   ipcMain.handle("project:create-scaffold", (_event, payload) => {
     const projectName = payload?.projectName || "AIANKUR Project";
     const target = payload?.target || "Cross-Platform Suite";
@@ -1944,6 +2016,8 @@ if (hasElectronApp() && typeof app.whenReady === "function") {
     const settings = ensureSettingsStore();
     applyStartupSetting(settings.openAtLogin);
     ensureExtensionsDirs();
+    ensureBackupJobsStore();
+    startBackupScheduler();
     registerIpcHandlers();
     wireAutoUpdaterEvents();
     createWindow();

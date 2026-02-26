@@ -70,6 +70,11 @@ This build provides a practical architecture to integrate free local models and 
    - Access profiles: `standard` (read/list) and `developer` (read/write + browser export)
    - Scope-aware enforcement for device info, file changes, and browser export actions
 
+11. **Background mode for connected devices**
+   - Scheduled background sync/backup jobs run after owner approval without repeated prompts
+   - Works for local Windows paths and Android shared storage paths
+   - Jobs can be enabled, paused, run immediately, or removed from the Devices panel
+
 ## Build and Run
 
 ### Prerequisites

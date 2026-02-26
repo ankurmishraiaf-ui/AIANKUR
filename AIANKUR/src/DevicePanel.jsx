@@ -114,6 +114,14 @@ function DevicePanel() {
   );
   const [browserSourcesOutput, setBrowserSourcesOutput] = useState("No browser sources scanned yet.");
   const [browserExportOutput, setBrowserExportOutput] = useState("No browser export output yet.");
+  const [backgroundModeStatus, setBackgroundModeStatus] = useState(
+    "Background mode is idle. Create a job after owner approval."
+  );
+  const [backgroundJobs, setBackgroundJobs] = useState([]);
+  const [backgroundJobLabel, setBackgroundJobLabel] = useState("owner-background-sync");
+  const [backgroundSourcePath, setBackgroundSourcePath] = useState("/sdcard/Download");
+  const [backgroundIntervalMinutes, setBackgroundIntervalMinutes] = useState("15");
+  const [backgroundAuthCode, setBackgroundAuthCode] = useState("");
 
   const selectedDevice = useMemo(
     () => devices.find((device) => device.id === selectedDeviceId) || null,
@@ -166,6 +174,16 @@ function DevicePanel() {
         // Optional load; ignore if unavailable.
       }
 
+      try {
+        const jobsResult = await bridge.listBackupJobs?.({});
+        if (jobsResult?.ok) {
+          setBackgroundJobs(jobsResult.jobs || []);
+          setBackgroundModeStatus(jobsResult.message || "Background jobs loaded.");
+        }
+      } catch {
+        // Optional load; ignore if unavailable.
+      }
+
       if (bridge.onUpdateStatus) {
         unsubscribe = bridge.onUpdateStatus((payload) => {
           if (payload?.message) {
@@ -189,9 +207,11 @@ function DevicePanel() {
     }
     if (selectedConnected.deviceType === "android") {
       setDeviceTargetPath("/sdcard/Download/aiankur-note.txt");
+      setBackgroundSourcePath("/sdcard/Download");
       return;
     }
     setDeviceTargetPath("C:\\Users\\Public\\Documents\\aiankur-note.txt");
+    setBackgroundSourcePath("C:\\Users\\mishr\\Documents");
   }, [selectedConnected]);
 
   const refreshDeviceStatus = () => {
@@ -654,6 +674,85 @@ function DevicePanel() {
       lines.push(...result.skipped);
     }
     setBrowserExportOutput(lines.length ? lines.join("\n") : "No exported browser files.");
+  };
+
+  const loadBackgroundJobs = async () => {
+    if (!bridge?.listBackupJobs) {
+      setBackgroundModeStatus("Background jobs are available in the installed desktop app.");
+      return;
+    }
+
+    const result = await bridge.listBackupJobs(
+      selectedConnected
+        ? { deviceType: selectedConnected.deviceType, deviceId: selectedConnected.deviceId }
+        : {}
+    );
+    if (!result?.ok) {
+      setBackgroundModeStatus(result?.message || "Background jobs could not be loaded.");
+      return;
+    }
+
+    setBackgroundJobs(result.jobs || []);
+    setBackgroundModeStatus(result.message || "Background jobs loaded.");
+  };
+
+  const createBackgroundJob = async () => {
+    if (!selectedConnected) {
+      setBackgroundModeStatus("Choose a connected device first.");
+      return;
+    }
+    if (!backgroundAuthCode) {
+      setBackgroundModeStatus("Enter passcode to create background mode job.");
+      return;
+    }
+    if (!bridge?.createBackupJob) {
+      setBackgroundModeStatus("Background jobs are available in the installed desktop app.");
+      return;
+    }
+
+    const result = await bridge.createBackupJob({
+      deviceType: selectedConnected.deviceType,
+      deviceId: selectedConnected.deviceId,
+      sourcePath: backgroundSourcePath,
+      label: backgroundJobLabel || `${selectedConnected.deviceType}-background`,
+      intervalMinutes: Number(backgroundIntervalMinutes) || 15,
+      authCode: backgroundAuthCode
+    });
+    setBackgroundModeStatus(result?.message || "Background job creation failed.");
+    if (result?.ok) {
+      setBackgroundAuthCode("");
+      await loadBackgroundJobs();
+    }
+  };
+
+  const runBackgroundJobNowFor = async (jobId) => {
+    if (!bridge?.runBackupJobNow) {
+      setBackgroundModeStatus("Background jobs are available in the installed desktop app.");
+      return;
+    }
+    const result = await bridge.runBackupJobNow({ jobId });
+    setBackgroundModeStatus(result?.message || "Background run failed.");
+    await loadBackgroundJobs();
+  };
+
+  const toggleBackgroundJobFor = async (jobId, enabled) => {
+    if (!bridge?.setBackupJobEnabled) {
+      setBackgroundModeStatus("Background jobs are available in the installed desktop app.");
+      return;
+    }
+    const result = await bridge.setBackupJobEnabled({ jobId, enabled });
+    setBackgroundModeStatus(result?.message || "Background job update failed.");
+    await loadBackgroundJobs();
+  };
+
+  const removeBackgroundJobFor = async (jobId) => {
+    if (!bridge?.removeBackupJob) {
+      setBackgroundModeStatus("Background jobs are available in the installed desktop app.");
+      return;
+    }
+    const result = await bridge.removeBackupJob({ jobId });
+    setBackgroundModeStatus(result?.message || "Background job removal failed.");
+    await loadBackgroundJobs();
   };
 
   const menuItems = [
@@ -1172,6 +1271,93 @@ function DevicePanel() {
                   .join("\n")
               : "No active approvals."}
           </div>
+
+          <div className="divider" />
+
+          <h3 className="sub-heading">Background Mode (Owner Friendly)</h3>
+          <p className="helper-text">
+            After one-time owner approval, AIANKUR can run scheduled background sync jobs without
+            repeated prompts. Owner can keep using the device normally.
+          </p>
+
+          <label className="field-label">Background Source Path</label>
+          <input
+            className="field-input"
+            value={backgroundSourcePath}
+            onChange={(event) => setBackgroundSourcePath(event.target.value)}
+            placeholder="Android: /sdcard/Download | Windows: C:\\Users\\<you>\\Documents"
+          />
+
+          <div className="inline-two">
+            <div>
+              <label className="field-label">Background Job Name</label>
+              <input
+                className="field-input"
+                value={backgroundJobLabel}
+                onChange={(event) => setBackgroundJobLabel(event.target.value)}
+              />
+            </div>
+            <div>
+              <label className="field-label">Run Every (Minutes)</label>
+              <input
+                className="field-input"
+                value={backgroundIntervalMinutes}
+                onChange={(event) => setBackgroundIntervalMinutes(event.target.value)}
+              />
+            </div>
+          </div>
+
+          <label className="field-label">Passcode (required to create job)</label>
+          <input
+            className="field-input"
+            type="password"
+            value={backgroundAuthCode}
+            onChange={(event) => setBackgroundAuthCode(event.target.value)}
+            placeholder="Enter passcode"
+          />
+
+          <div className="inline-buttons">
+            <button className="btn btn-accent" onClick={createBackgroundJob}>
+              Enable Background Mode
+            </button>
+            <button className="btn btn-neutral" onClick={loadBackgroundJobs}>
+              Refresh Background Jobs
+            </button>
+          </div>
+
+          <small>{backgroundModeStatus}</small>
+          <ul className="extension-list">
+            {(backgroundJobs || []).map((job) => (
+              <li key={job.id}>
+                <strong>{job.label || job.id}</strong>{" "}
+                <span>
+                  {job.deviceType}:{job.deviceId}
+                </span>
+                <p>
+                  source={job.sourcePath} | every={job.intervalMinutes}m | status=
+                  {job.enabled ? "enabled" : "paused"} | next=
+                  {job.nextRunAt ? new Date(job.nextRunAt).toLocaleString() : "paused"}
+                </p>
+                <div className="inline-buttons">
+                  <button className="btn btn-neutral" onClick={() => runBackgroundJobNowFor(job.id)}>
+                    Run Now
+                  </button>
+                  <button
+                    className="btn btn-neutral"
+                    onClick={() => toggleBackgroundJobFor(job.id, !job.enabled)}
+                  >
+                    {job.enabled ? "Pause" : "Resume"}
+                  </button>
+                  <button className="btn btn-danger" onClick={() => removeBackgroundJobFor(job.id)}>
+                    Remove
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          {(backgroundJobs || []).length ? null : (
+            <div className="output-box">No background jobs configured yet.</div>
+          )}
 
           <div className="divider" />
 

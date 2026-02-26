@@ -27,7 +27,9 @@ export function setSecretCode(code) {
     saveSecretHash(hashCode(code));
 }
 
-// Set initial code if not already set
-if (!getSecretHash()) {
-    setSecretCode('621956');
+// Helper to ensure initial code is set (call in app, not at module load)
+export function ensureInitialSecretCode() {
+    if (!getSecretHash()) {
+        setSecretCode('621956');
+    }
 }

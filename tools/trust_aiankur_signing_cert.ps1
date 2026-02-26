@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $false)]
-  [string]$CertThumbprint = "DCA356C9EB584B1296588178A32A9606EAC00413",
+  [string]$CertThumbprint = "",
 
   [Parameter(Mandatory = $false)]
   [string]$CertFilePath,
@@ -51,7 +51,10 @@ function Ensure-CertFile {
   }
 
   if (Test-Path $normalizedOutputPath) {
-    return (Resolve-Path $normalizedOutputPath).Path
+    $existingCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($normalizedOutputPath)
+    if (-not $Thumbprint -or $existingCert.Thumbprint -eq $Thumbprint) {
+      return (Resolve-Path $normalizedOutputPath).Path
+    }
   }
 
   $cert = Get-CertByThumbprint -Thumbprint $Thumbprint

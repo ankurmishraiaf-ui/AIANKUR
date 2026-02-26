@@ -159,6 +159,7 @@ This imports AIANKUR signing certificate into current-user trusted stores so sig
 - Command execution is intentionally powerful and should be used carefully.
 - Keep your secret code private.
 - For production, replace demo OTP with real SMS/email/TOTP provider.
+- Windows build is configured with `requestedExecutionLevel: requireAdministrator`, so AIANKUR requests administrator elevation on every launch.
 
 ## Antivirus Compatibility
 

@@ -23,6 +23,7 @@
   ],
   "generateUpdatesFilesForAllChannels": true,
   "win": {
+    "requestedExecutionLevel": "requireAdministrator",
     "target": [
       {
         "target": "nsis",

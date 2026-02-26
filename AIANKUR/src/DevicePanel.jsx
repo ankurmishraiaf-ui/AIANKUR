@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
+import fs from "fs";
+import path from "path";
 import { authenticate, changeSecretCode, sendOtp } from "./auth";
 import {
   clearOpenAIApiKey,
@@ -7,7 +9,8 @@ import {
   listModels,
   queryModel,
   saveOpenAIApiKey,
-  setCodexRoutePolicy
+  setCodexRoutePolicy,
+  loadPersistentHistory
 } from "./aiEngine";
 
 const mockDevices = [
@@ -28,6 +31,13 @@ const platformTargets = [
 ];
 
 function DevicePanel() {
+  // Load persistent requirements and steps for context
+  const [persistentContext, setPersistentContext] = useState({ history: [], requirements: [], actions: [] });
+  useEffect(() => {
+    try {
+      setPersistentContext(loadPersistentHistory());
+    } catch { }
+  }, []);
   const bridge = typeof window !== "undefined" ? window.aiankur : null;
   const models = listModels();
 
@@ -275,6 +285,29 @@ function DevicePanel() {
     setIsCommandRunning(false);
   };
 
+  // Path to persistent history file
+  const historyFilePath = path.join(
+    "C:\\Users\\mishr\\OneDrive\\Documents\\GitHub\\AIANKUR\\AIANKUR",
+    "aiankur_history.json"
+  );
+
+  // Helper to append to persistent history
+  const appendToHistory = (entry) => {
+    try {
+      let data = { history: [], requirements: [], actions: [] };
+      if (fs.existsSync(historyFilePath)) {
+        data = JSON.parse(fs.readFileSync(historyFilePath, "utf-8"));
+      }
+      data.history.push({
+        timestamp: new Date().toISOString(),
+        ...entry
+      });
+      fs.writeFileSync(historyFilePath, JSON.stringify(data, null, 2));
+    } catch (e) {
+      // Ignore file errors for now
+    }
+  };
+
   const runModelQuery = async () => {
     if (!modelPrompt.trim()) {
       setModelResponse("Prompt is empty.");
@@ -285,8 +318,16 @@ function DevicePanel() {
     const selectedInfo = selectedDevice
       ? ` Selected device: ${selectedDevice.name} (${selectedDevice.status}).`
       : "";
-    const response = await queryModel(selectedModel, `${modelPrompt}${selectedInfo}`);
+    const promptText = `${modelPrompt}${selectedInfo}`;
+    const response = await queryModel(selectedModel, promptText);
     setModelResponse(response);
+    // Log to persistent history
+    appendToHistory({
+      type: "model-query",
+      model: selectedModel,
+      prompt: promptText,
+      response
+    });
     setIsModelLoading(false);
   };
 
@@ -1264,11 +1305,11 @@ function DevicePanel() {
           <div className="output-box">
             {(activeConsents || []).length
               ? activeConsents
-                  .map(
-                    (item) =>
-                      `${item.deviceType}:${item.deviceId} | owner=${item.ownerName} | profile=${item.accessProfile || "developer"} | expires=${item.expiresLabel || item.expiresAt || "never"}`
-                  )
-                  .join("\n")
+                .map(
+                  (item) =>
+                    `${item.deviceType}:${item.deviceId} | owner=${item.ownerName} | profile=${item.accessProfile || "developer"} | expires=${item.expiresLabel || item.expiresAt || "never"}`
+                )
+                .join("\n")
               : "No active approvals."}
           </div>
 

@@ -1,3 +1,21 @@
+// Persistent history/context loader for AIANKUR
+import fs from "fs";
+import path from "path";
+
+export function loadPersistentHistory() {
+  const historyFilePath = path.join(
+    "C:\\Users\\mishr\\OneDrive\\Documents\\GitHub\\AIANKUR\\AIANKUR",
+    "aiankur_history.json"
+  );
+  if (!fs.existsSync(historyFilePath)) {
+    return { history: [], requirements: [], actions: [] };
+  }
+  try {
+    return JSON.parse(fs.readFileSync(historyFilePath, "utf-8"));
+  } catch {
+    return { history: [], requirements: [], actions: [] };
+  }
+}
 export const availableModels = [
   {
     id: "gpt-5.3-codex",

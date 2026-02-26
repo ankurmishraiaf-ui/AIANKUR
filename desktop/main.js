@@ -14,6 +14,7 @@ const DEVICE_ACCESS_MINUTES_MAX = 30 * 24 * 60;
 const BACKUP_ROOT_FOLDER = "AIANKUR-Backups";
 const BROWSER_EXPORT_ROOT_FOLDER = "AIANKUR-Browser-Exports";
 const OWNER_REQUEST_WINDOW_MINUTES = 30;
+const ADB_TIMEOUT_MS = 20_000;
 const DEVICE_ACCESS_PROFILE_DEFAULT = "developer";
 const DEVICE_ACCESS_PROFILES = Object.freeze({
   standard: ["read-device-info", "list-accessible-files"],
@@ -25,10 +26,18 @@ const DEVICE_ACCESS_PROFILES = Object.freeze({
     "run-backups"
   ]
 });
+const ANDROID_SHARED_ROOTS = Object.freeze([
+  "/sdcard",
+  "/storage/emulated/0",
+  "/storage/self/primary",
+  "/mnt/sdcard"
+]);
 
 let mainWindow = null;
 let autoUpdaterInstance = undefined;
 let backupSchedulerHandle = null;
+let cachedAdbExecutable = null;
+const androidSharedRootCache = new Map();
 
 function hasElectronApp() {
   return Boolean(app && typeof app.getPath === "function");
@@ -319,11 +328,121 @@ function getDeviceConsentWithScope(deviceType, deviceId, requiredScope) {
   return consent;
 }
 
-function runAdbCommand(args) {
-  const result = spawnSync("adb", args, {
+function uniqNonEmpty(values) {
+  return [...new Set((values || []).map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function quoteForPosixShell(value) {
+  return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function getAdbExecutableCandidates() {
+  const candidates = [];
+  const add = (candidate) => {
+    if (!candidate) {
+      return;
+    }
+    candidates.push(candidate);
+  };
+
+  add("adb");
+
+  const envCandidates = [
+    process.env.AIANKUR_ADB_PATH,
+    process.env.ADB_PATH,
+    process.env.ANDROID_HOME && path.join(process.env.ANDROID_HOME, "platform-tools", "adb.exe"),
+    process.env.ANDROID_HOME && path.join(process.env.ANDROID_HOME, "platform-tools", "adb"),
+    process.env.ANDROID_SDK_ROOT && path.join(process.env.ANDROID_SDK_ROOT, "platform-tools", "adb.exe"),
+    process.env.ANDROID_SDK_ROOT && path.join(process.env.ANDROID_SDK_ROOT, "platform-tools", "adb")
+  ];
+  envCandidates.forEach(add);
+
+  if (process.platform === "win32") {
+    add(path.join(process.env.LOCALAPPDATA || "", "Android", "Sdk", "platform-tools", "adb.exe"));
+    add(path.join(process.env.USERPROFILE || "", "AppData", "Local", "Android", "Sdk", "platform-tools", "adb.exe"));
+    add(path.join(process.env["ProgramFiles"] || "", "Android", "platform-tools", "adb.exe"));
+    add(path.join(process.env["ProgramFiles(x86)"] || "", "Android", "platform-tools", "adb.exe"));
+  }
+
+  return uniqNonEmpty(candidates);
+}
+
+function testAdbExecutable(adbExecutable) {
+  const result = spawnSync(adbExecutable, ["version"], {
     encoding: "utf8",
-    windowsHide: true
+    windowsHide: true,
+    timeout: 5000
   });
+  if (result.error) {
+    return false;
+  }
+  if (result.status !== 0) {
+    return false;
+  }
+  const text = `${result.stdout || ""} ${result.stderr || ""}`.toLowerCase();
+  return text.includes("android debug bridge");
+}
+
+function resolveAdbExecutable(forceRefresh = false) {
+  if (cachedAdbExecutable && !forceRefresh) {
+    return { ok: true, adbPath: cachedAdbExecutable };
+  }
+
+  const candidates = getAdbExecutableCandidates();
+  for (const candidate of candidates) {
+    if (candidate !== "adb" && !fs.existsSync(candidate)) {
+      continue;
+    }
+    if (testAdbExecutable(candidate)) {
+      cachedAdbExecutable = candidate;
+      return { ok: true, adbPath: candidate };
+    }
+  }
+
+  return {
+    ok: false,
+    adbPath: null,
+    error:
+      "ADB not found. Install Android Platform Tools and connect device with USB debugging enabled."
+  };
+}
+
+function runAdbCommand(args, options = {}) {
+  const resolved = resolveAdbExecutable(Boolean(options.forceRefresh));
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: resolved.error
+    };
+  }
+
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : ADB_TIMEOUT_MS;
+  let result = spawnSync(resolved.adbPath, args, {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: timeoutMs
+  });
+
+  const firstOutputText = `${result.stdout || ""}\n${result.stderr || ""}`.toLowerCase();
+  const shouldRestartServer =
+    !result.error &&
+    result.status !== 0 &&
+    /(daemon not running|cannot connect to daemon|no server|server.*out of date)/i.test(firstOutputText);
+
+  if (shouldRestartServer) {
+    spawnSync(resolved.adbPath, ["start-server"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: timeoutMs
+    });
+    result = spawnSync(resolved.adbPath, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: timeoutMs
+    });
+  }
+
   if (result.error) {
     return {
       ok: false,
@@ -331,6 +450,7 @@ function runAdbCommand(args) {
       stderr: result.error.message
     };
   }
+
   return {
     ok: result.status === 0,
     stdout: (result.stdout || "").trim(),
@@ -338,8 +458,140 @@ function runAdbCommand(args) {
   };
 }
 
+function runAndroidShell(serial, shellCommand, options = {}) {
+  return runAdbCommand(["-s", serial, "shell", "sh", "-c", shellCommand], options);
+}
+
+function getAndroidRootFromPath(remotePath) {
+  const normalized = normalizeAndroidPath(remotePath);
+  if (!normalized) {
+    return "";
+  }
+  const sortedRoots = [...ANDROID_SHARED_ROOTS].sort((a, b) => b.length - a.length);
+  for (const root of sortedRoots) {
+    if (normalized === root || normalized.startsWith(`${root}/`)) {
+      return root;
+    }
+  }
+  return "";
+}
+
+function getReachableAndroidRoot(serial, forceRefresh = false) {
+  if (!serial) {
+    return ANDROID_SHARED_ROOTS[0];
+  }
+  if (!forceRefresh && androidSharedRootCache.has(serial)) {
+    return androidSharedRootCache.get(serial);
+  }
+
+  for (const root of ANDROID_SHARED_ROOTS) {
+    const probe = runAndroidShell(serial, `ls -d ${quoteForPosixShell(root)}`);
+    if (probe.ok) {
+      androidSharedRootCache.set(serial, root);
+      return root;
+    }
+  }
+
+  const fallback = ANDROID_SHARED_ROOTS[0];
+  androidSharedRootCache.set(serial, fallback);
+  return fallback;
+}
+
+function remapAndroidPathToReachableRoot(serial, remotePath) {
+  const normalized = normalizeAndroidPath(remotePath);
+  if (!normalized) {
+    return getReachableAndroidRoot(serial);
+  }
+
+  const sourceRoot = getAndroidRootFromPath(normalized);
+  if (!sourceRoot) {
+    return normalized;
+  }
+
+  const reachableRoot = getReachableAndroidRoot(serial);
+  if (!reachableRoot || sourceRoot === reachableRoot) {
+    return normalized;
+  }
+
+  const suffix = normalized.slice(sourceRoot.length);
+  return `${reachableRoot}${suffix}`;
+}
+
+function describeAndroidConnectionState(status) {
+  const value = String(status || "").toLowerCase();
+  if (value === "device") {
+    return "Authorized via USB debugging.";
+  }
+  if (value === "unauthorized") {
+    return "Waiting for owner approval on phone (Allow USB debugging).";
+  }
+  if (value === "offline") {
+    return "Device is connected but currently offline.";
+  }
+  if (value === "recovery" || value === "sideload" || value === "bootloader") {
+    return `Device is in ${value} mode.`;
+  }
+  return "Connection state is unknown.";
+}
+
+function parseAdbDeviceLine(line) {
+  const parts = String(line || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) {
+    return null;
+  }
+
+  const serial = parts[0] || "unknown";
+  const status = parts[1] || "unknown";
+  const metadata = {};
+
+  for (const token of parts.slice(2)) {
+    const idx = token.indexOf(":");
+    if (idx <= 0) {
+      continue;
+    }
+    const key = token.slice(0, idx);
+    const value = token.slice(idx + 1);
+    if (key && value) {
+      metadata[key] = value;
+    }
+  }
+
+  const modelName = (metadata.model || "").replace(/_/g, " ").trim();
+  const productName = (metadata.product || "").replace(/_/g, " ").trim();
+  const deviceCode = metadata.device || "";
+  const detailParts = [
+    productName ? `product ${productName}` : "",
+    deviceCode ? `device ${deviceCode}` : "",
+    metadata.transport_id ? `transport ${metadata.transport_id}` : "",
+    describeAndroidConnectionState(status)
+  ].filter(Boolean);
+
+  return {
+    deviceType: "android",
+    deviceId: serial,
+    name: modelName || productName || serial,
+    status,
+    details: detailParts.join(" | ")
+  };
+}
+
+function readAndroidProperty(serial, keys, fallbackValue = "(unknown)") {
+  const keyList = Array.isArray(keys) ? keys : [keys];
+  for (const key of keyList) {
+    const propertyName = String(key || "").trim();
+    if (!propertyName) {
+      continue;
+    }
+    const result = runAdbCommand(["-s", serial, "shell", "getprop", propertyName]);
+    if (result.ok && result.stdout) {
+      return result.stdout.trim();
+    }
+  }
+  return fallbackValue;
+}
+
 function listAndroidDevices() {
-  const adbResult = runAdbCommand(["devices"]);
+  const adbResult = runAdbCommand(["devices", "-l"]);
   if (!adbResult.ok) {
     return {
       ok: false,
@@ -348,66 +600,85 @@ function listAndroidDevices() {
     };
   }
 
-  const lines = adbResult.stdout.split(/\r?\n/).slice(1).filter(Boolean);
-  const devices = lines.map((line) => {
-    const [serial, status] = line.trim().split(/\s+/);
-    return {
-      deviceType: "android",
-      deviceId: serial || "unknown",
-      name: serial || "Android Device",
-      status: status || "unknown",
-      details: status === "device" ? "Authorized via USB debugging." : "Needs owner authorization."
-    };
-  });
+  const lines = adbResult.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.toLowerCase().startsWith("list of devices attached"));
 
+  const devices = lines.map(parseAdbDeviceLine).filter(Boolean);
   return {
     ok: true,
     devices,
-    message: `Found ${devices.length} Android device(s).`
+    message: devices.length
+      ? `Found ${devices.length} Android device(s).`
+      : "No Android device detected. Connect USB and enable USB debugging."
   };
 }
 
 function getAndroidDeviceInfo(serial) {
-  const model = runAdbCommand(["-s", serial, "shell", "getprop", "ro.product.model"]);
-  const brand = runAdbCommand(["-s", serial, "shell", "getprop", "ro.product.brand"]);
-  const version = runAdbCommand(["-s", serial, "shell", "getprop", "ro.build.version.release"]);
-
-  if (!model.ok) {
+  const state = runAdbCommand(["-s", serial, "get-state"]);
+  const connectionState = (state.stdout || "").trim() || "unknown";
+  if (!state.ok || connectionState !== "device") {
     return {
       ok: false,
-      message: model.stderr || "Unable to query Android device info.",
+      message:
+        state.stderr ||
+        `Android device is not ready (state: ${connectionState}). Confirm USB debugging authorization.`,
       info: null
     };
   }
+
+  const model = readAndroidProperty(serial, ["ro.product.model", "ro.product.vendor.model"]);
+  const manufacturer = readAndroidProperty(serial, ["ro.product.manufacturer", "ro.product.brand"]);
+  const brand = readAndroidProperty(serial, ["ro.product.brand", "ro.product.manufacturer"]);
+  const version = readAndroidProperty(serial, ["ro.build.version.release"]);
+  const apiLevel = readAndroidProperty(serial, ["ro.build.version.sdk"]);
+  const deviceCode = readAndroidProperty(serial, ["ro.product.device", "ro.build.product"]);
+  const sharedRoot = getReachableAndroidRoot(serial, true);
 
   return {
     ok: true,
     message: "Android device info loaded.",
     info: {
       serial,
-      model: model.stdout || "(unknown)",
-      brand: brand.stdout || "(unknown)",
-      androidVersion: version.stdout || "(unknown)"
+      model: model || "(unknown)",
+      brand: brand || "(unknown)",
+      manufacturer: manufacturer || "(unknown)",
+      androidVersion: version || "(unknown)",
+      apiLevel: apiLevel || "(unknown)",
+      deviceCode: deviceCode || "(unknown)",
+      sharedRoot
     }
   };
 }
 
 function listAndroidFiles(serial, remotePath) {
-  const pathArg = String(remotePath || "/sdcard").trim() || "/sdcard";
-  const result = runAdbCommand(["-s", serial, "shell", "ls", "-1", pathArg]);
-  if (!result.ok) {
+  const normalizedInput = normalizeAndroidPath(remotePath || "");
+  const basePath = normalizedInput || getReachableAndroidRoot(serial);
+  const candidatePaths = uniqNonEmpty([remapAndroidPathToReachableRoot(serial, basePath), basePath]);
+  const errors = [];
+
+  for (const candidatePath of candidatePaths) {
+    const command = `ls -1 ${quoteForPosixShell(candidatePath)}`;
+    const result = runAndroidShell(serial, command);
+    if (!result.ok) {
+      errors.push(`${candidatePath}: ${result.stderr || "ls failed"}`);
+      continue;
+    }
+
+    const files = result.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
     return {
-      ok: false,
-      message: result.stderr || "Unable to list files on Android device.",
-      files: []
+      ok: true,
+      message: `Loaded ${files.length} item(s) from ${candidatePath}.`,
+      files,
+      resolvedPath: candidatePath
     };
   }
 
-  const files = result.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
   return {
-    ok: true,
-    message: `Loaded ${files.length} item(s) from ${pathArg}.`,
-    files
+    ok: false,
+    message: errors.join(" | ") || "Unable to list files on Android device.",
+    files: []
   };
 }
 
@@ -635,7 +906,7 @@ function exportWindowsBrowserData(payload) {
 function exportAndroidBrowserData(payload) {
   const serial = String(payload?.deviceId || "").trim();
   const authCode = String(payload?.authCode || "").trim();
-  const sourcePath = normalizeAndroidPath(payload?.sourcePath || "/sdcard/Download");
+  const sourcePathInput = normalizeAndroidPath(payload?.sourcePath || "/sdcard/Download");
 
   if (!serial) {
     return { ok: false, message: "Android device id is required.", destinationPath: "", files: [] };
@@ -653,17 +924,18 @@ function exportAndroidBrowserData(payload) {
       files: []
     };
   }
-  if (!isAllowedAndroidMutationPath(sourcePath)) {
+  if (!isAllowedAndroidMutationPath(sourcePathInput)) {
     return {
       ok: false,
       message:
-        "Android source path must be in shared storage (/sdcard/* or /storage/emulated/0/*).",
+        "Android source path must be in shared storage (/sdcard/*, /storage/emulated/0/*, /storage/self/primary/*, or /mnt/sdcard/*).",
       destinationPath: "",
       files: []
     };
   }
 
-  const listResult = runAdbCommand(["-s", serial, "shell", "ls", "-1", sourcePath]);
+  const sourcePath = remapAndroidPathToReachableRoot(serial, sourcePathInput);
+  const listResult = runAndroidShell(serial, `ls -1 ${quoteForPosixShell(sourcePath)}`);
   if (!listResult.ok) {
     return {
       ok: false,
@@ -732,13 +1004,63 @@ function exportBrowserData(payload) {
   return { ok: false, message: "Unsupported device type for browser export.", destinationPath: "", files: [] };
 }
 
+function getWindowsComputerSystemProfile() {
+  const command = [
+    "$cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue",
+    "$os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue",
+    "[PSCustomObject]@{",
+    "  Manufacturer = $cs.Manufacturer",
+    "  Model = $cs.Model",
+    "  OsCaption = $os.Caption",
+    "  OsVersion = $os.Version",
+    "} | ConvertTo-Json -Compress"
+  ].join("; ");
+
+  const result = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+    { encoding: "utf8", windowsHide: true, timeout: 12_000 }
+  );
+
+  if (result.error || result.status !== 0) {
+    return {
+      manufacturer: "(unknown)",
+      model: "(unknown)",
+      osCaption: "",
+      osVersion: ""
+    };
+  }
+
+  try {
+    const parsed = JSON.parse((result.stdout || "").trim() || "{}");
+    const data = Array.isArray(parsed) ? parsed[0] || {} : parsed;
+    return {
+      manufacturer: String(data.Manufacturer || "").trim() || "(unknown)",
+      model: String(data.Model || "").trim() || "(unknown)",
+      osCaption: String(data.OsCaption || "").trim(),
+      osVersion: String(data.OsVersion || "").trim()
+    };
+  } catch {
+    return {
+      manufacturer: "(unknown)",
+      model: "(unknown)",
+      osCaption: "",
+      osVersion: ""
+    };
+  }
+}
+
 function listWindowsDevices() {
+  const profile = getWindowsComputerSystemProfile();
+  const makeName = [profile.manufacturer, profile.model]
+    .filter((value) => value && value !== "(unknown)")
+    .join(" ");
   const localDevice = {
     deviceType: "windows",
     deviceId: os.hostname(),
-    name: `${os.hostname()} (This PC)`,
+    name: `${os.hostname()}${makeName ? ` (${makeName})` : " (This PC)"}`,
     status: "available",
-    details: `${os.platform()} ${os.release()}`
+    details: `${profile.osCaption || `${os.platform()} ${os.release()}`}`
   };
   return {
     ok: true,
@@ -757,6 +1079,7 @@ function getWindowsDeviceInfo(targetId) {
       info: null
     };
   }
+  const profile = getWindowsComputerSystemProfile();
 
   const drivesResult = spawnSync(
     "powershell.exe",
@@ -782,6 +1105,10 @@ function getWindowsDeviceInfo(targetId) {
     info: {
       host: expectedId,
       platform: `${os.platform()} ${os.release()}`,
+      osName: profile.osCaption || "(unknown)",
+      osVersion: profile.osVersion || os.release(),
+      manufacturer: profile.manufacturer || "(unknown)",
+      model: profile.model || "(unknown)",
       user: os.userInfo().username,
       memoryGB: Math.round((os.totalmem() / (1024 * 1024 * 1024)) * 10) / 10,
       drives
@@ -811,12 +1138,19 @@ function isAllowedWindowsMutationPath(targetPath) {
 }
 
 function normalizeAndroidPath(remotePath) {
-  return String(remotePath || "").trim().replace(/\\/g, "/");
+  let normalized = String(remotePath || "").trim().replace(/\\/g, "/");
+  normalized = normalized.replace(/\/{2,}/g, "/");
+  if (normalized.length > 1 && normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
 }
 
 function isAllowedAndroidMutationPath(remotePath) {
   const normalized = normalizeAndroidPath(remotePath);
-  return normalized.startsWith("/sdcard/") || normalized.startsWith("/storage/emulated/0/");
+  return ANDROID_SHARED_ROOTS.some(
+    (root) => normalized === root || normalized.startsWith(`${root}/`)
+  );
 }
 
 function applyWindowsDeviceChange(payload) {
@@ -864,7 +1198,7 @@ function applyWindowsDeviceChange(payload) {
 function applyAndroidDeviceChange(payload) {
   const serial = String(payload?.serial || "").trim();
   const operation = String(payload?.operation || "").trim();
-  const remotePath = normalizeAndroidPath(payload?.remotePath || "");
+  const remotePathInput = normalizeAndroidPath(payload?.remotePath || "");
   const authCode = String(payload?.authCode || "").trim();
   const content = String(payload?.content || "");
 
@@ -879,23 +1213,24 @@ function applyAndroidDeviceChange(payload) {
   if (!validateSecretCode(authCode)) {
     return { ok: false, message: "Secret code validation failed for write operation." };
   }
-  if (!isAllowedAndroidMutationPath(remotePath)) {
+  if (!isAllowedAndroidMutationPath(remotePathInput)) {
     return {
       ok: false,
       message:
-        "Android path is outside allowed scope. Allowed scope is /sdcard/* or /storage/emulated/0/*."
+        "Android path is outside allowed scope. Allowed scope is shared storage roots such as /sdcard/*."
     };
   }
+  const remotePath = remapAndroidPathToReachableRoot(serial, remotePathInput);
 
   if (operation === "create-folder") {
-    const result = runAdbCommand(["-s", serial, "shell", "mkdir", "-p", remotePath]);
+    const result = runAndroidShell(serial, `mkdir -p ${quoteForPosixShell(remotePath)}`);
     return result.ok
       ? { ok: true, message: `Folder created on Android: ${remotePath}` }
       : { ok: false, message: result.stderr || "Android create-folder failed." };
   }
 
   if (operation === "delete-path") {
-    const result = runAdbCommand(["-s", serial, "shell", "rm", "-rf", remotePath]);
+    const result = runAndroidShell(serial, `rm -rf ${quoteForPosixShell(remotePath)}`);
     return result.ok
       ? { ok: true, message: `Deleted Android path: ${remotePath}` }
       : { ok: false, message: result.stderr || "Android delete-path failed." };
@@ -903,7 +1238,7 @@ function applyAndroidDeviceChange(payload) {
 
   if (operation === "write-text") {
     const remoteDir = path.posix.dirname(remotePath);
-    const makeDir = runAdbCommand(["-s", serial, "shell", "mkdir", "-p", remoteDir]);
+    const makeDir = runAndroidShell(serial, `mkdir -p ${quoteForPosixShell(remoteDir)}`);
     if (!makeDir.ok) {
       return { ok: false, message: makeDir.stderr || "Unable to create parent folder on Android." };
     }

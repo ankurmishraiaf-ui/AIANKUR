@@ -11,10 +11,13 @@
     "build:signed": "npm run renderer:build && electron-builder --config electron-builder.json -c.forceCodeSigning=true",
     "dist": "npm run build",
     "publish:github": "npm run renderer:build && electron-builder --config electron-builder.json --publish always",
-    "publish:github:signed": "npm run renderer:build && electron-builder --config electron-builder.json --publish always -c.forceCodeSigning=true"
+    "publish:github:signed": "npm run renderer:build && electron-builder --config electron-builder.json --publish always -c.forceCodeSigning=true",
+    "publish:github:signed:local": "pwsh -ExecutionPolicy Bypass -File tools/publish_signed_local.ps1",
+    "trust:local-cert": "powershell -ExecutionPolicy Bypass -File tools/trust_aiankur_signing_cert.ps1"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "libsodium-wrappers": "^0.8.2"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

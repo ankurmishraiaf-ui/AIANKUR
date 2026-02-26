@@ -35,3 +35,7 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+
+# Local signing artifacts
+tools/*.cer
+tools/*.pfx

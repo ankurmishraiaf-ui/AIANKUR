@@ -134,6 +134,20 @@ CI signed release workflow:
   2. `CSC_LINK` (base64 `.pfx` content or secure cert URL/file reference)
   3. `CSC_KEY_PASSWORD` (certificate password)
 
+Replace temporary/self-signed certificate with your CA-issued `.pfx`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/set_signing_secrets_from_pfx.ps1 -PfxPath "C:\path\real-codesign.pfx" -PfxPassword "your-pfx-password"
+```
+
+Local trust workaround (for this PC only):
+
+```bash
+npm run trust:local-cert
+```
+
+This imports AIANKUR signing certificate into current-user trusted stores so signed builds are locally trusted on this machine.
+
 ## Adding Future Functions
 
 1. Add UI module in `AIANKUR/src/`

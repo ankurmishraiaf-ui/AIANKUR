@@ -165,6 +165,17 @@ function findModel(modelIdOrName) {
 }
 
 async function queryOllama(modelName, prompt) {
+  // Check if Ollama is running before attempting fetch
+  try {
+    const ping = await fetch("http://127.0.0.1:11434/api/info");
+    if (!ping.ok) {
+      throw new Error("Ollama is not running. Please start Ollama.");
+    }
+  } catch (err) {
+    throw new Error("Ollama is not running. Please start Ollama.");
+  }
+
+  // Proceed with model query
   const response = await fetch("http://127.0.0.1:11434/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -176,7 +187,7 @@ async function queryOllama(modelName, prompt) {
   });
 
   if (!response.ok) {
-    throw new Error(`Ollama returned ${response.status}. Ensure Ollama is running.`);
+    throw new Error(`Ollama returned ${response.status}. Ensure Ollama is running and the model '${modelName}' is downloaded.`);
   }
 
   const payload = await response.json();
@@ -204,10 +215,11 @@ export async function queryModel(modelIdOrName, prompt) {
         const localText = await queryOllama(selectedModel.localFallbackModel, routedPrompt);
         return `[codex-route: local-free (${selectedModel.localFallbackModel})] ${reasonPrefix}\n${localText}`;
       } catch (error) {
+        // Make error message more prominent and clear
         return (
           `[codex-route: local-free] ${reasonPrefix}\n` +
-          `Local fallback failed. ${error.message}\n` +
-          `Install and run Ollama, then download model: ollama pull ${selectedModel.localFallbackModel}`
+          `❗ Local fallback failed: ${error.message}\n` +
+          `👉 Please install and run Ollama, then download model: ollama pull ${selectedModel.localFallbackModel}`
         );
       }
     };

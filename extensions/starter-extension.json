@@ -1,0 +1,6 @@
+{
+  "id": "starter.aiankur.extension",
+  "name": "Starter Extension",
+  "version": "1.0.0",
+  "description": "Example extension manifest. Add your own JSON files in the extensions directory to register future capabilities."
+}

@@ -1,0 +1,25 @@
+{
+  "name": "aiankur-desktop",
+  "version": "1.0.3",
+  "description": "AIANKUR desktop AI workspace",
+  "author": "ankurmishraiaf-ui",
+  "main": "desktop/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"npm --prefix AIANKUR run dev\" \"wait-on tcp:5173 && electron .\"",
+    "renderer:build": "npm --prefix AIANKUR run build",
+    "build": "npm run renderer:build && electron-builder --config electron-builder.json",
+    "build:signed": "npm run renderer:build && electron-builder --config electron-builder.json -c.forceCodeSigning=true",
+    "dist": "npm run build",
+    "publish:github": "npm run renderer:build && electron-builder --config electron-builder.json --publish always",
+    "publish:github:signed": "npm run renderer:build && electron-builder --config electron-builder.json --publish always -c.forceCodeSigning=true"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "electron": "^31.7.7",
+    "electron-builder": "^25.1.8",
+    "wait-on": "^8.0.4"
+  }
+}

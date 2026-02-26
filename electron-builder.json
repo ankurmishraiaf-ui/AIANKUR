@@ -1,0 +1,42 @@
+{
+  "appId": "com.aiankur.desktop",
+  "productName": "AIANKUR",
+  "directories": {
+    "output": "C:/Users/mishr/Desktop/AIANKUR/build"
+  },
+  "files": [
+    "desktop/**/*",
+    "AIANKUR/dist/**/*",
+    "extensions/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "desktop/main.js"
+  },
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "ankurmishraiaf-ui",
+      "repo": "AIANKUR",
+      "releaseType": "release"
+    }
+  ],
+  "generateUpdatesFilesForAllChannels": true,
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "AIANKUR-Setup-${version}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
+  }
+}

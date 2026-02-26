@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld("aiankur", {
   getExtensionsUserDir: () => ipcRenderer.invoke("extensions:get-user-dir"),
   openPath: (targetPath) => ipcRenderer.invoke("system:open-path", targetPath),
   checkUpdates: () => ipcRenderer.invoke("update:check"),
+  downloadUpdate: () => ipcRenderer.invoke("update:download"),
+  installUpdate: () => ipcRenderer.invoke("update:install"),
   onUpdateStatus: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("update:status", listener);

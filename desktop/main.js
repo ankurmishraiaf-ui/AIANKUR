@@ -2354,6 +2354,33 @@ if (hasElectronApp() && typeof app.whenReady === "function") {
     ensureBackupJobsStore();
     startBackupScheduler();
     registerIpcHandlers();
+
+    // --- Auto-Update Download/Install IPC Handlers ---
+    ipcMain.handle("update:download", async () => {
+      const autoUpdater = getAutoUpdater();
+      if (!autoUpdater) {
+        return { ok: false, message: "Updater module is unavailable in current runtime." };
+      }
+      try {
+        await autoUpdater.downloadUpdate();
+        return { ok: true, message: "Update download started." };
+      } catch (error) {
+        return { ok: false, message: `Download failed: ${error.message}` };
+      }
+    });
+
+    ipcMain.handle("update:install", async () => {
+      const autoUpdater = getAutoUpdater();
+      if (!autoUpdater) {
+        return { ok: false, message: "Updater module is unavailable in current runtime." };
+      }
+      try {
+        autoUpdater.quitAndInstall();
+        return { ok: true, message: "Installing update and restarting..." };
+      } catch (error) {
+        return { ok: false, message: `Install failed: ${error.message}` };
+      }
+    });
     wireAutoUpdaterEvents();
     createWindow();
 

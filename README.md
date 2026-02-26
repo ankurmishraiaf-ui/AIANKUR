@@ -105,6 +105,11 @@ Installer output is configured to:
 
 `C:\Users\mishr\Desktop\AIANKUR\build`
 
+After each build, the latest installer is also copied to:
+
+- `C:\AIANKUR\AIANKUR-Setup-latest.exe` (stable copy on local PC drive)
+- `C:\Users\mishr\Desktop\AIANKUR-Setup-latest.exe` (quick access from desktop)
+
 ## Self-Update Configuration (Next Step)
 
 ### Publish updates to GitHub Releases

@@ -1,6 +1,6 @@
 {
   "name": "aiankur-desktop",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "AIANKUR desktop AI workspace",
   "author": "ankurmishraiaf-ui",
   "main": "desktop/main.js",
